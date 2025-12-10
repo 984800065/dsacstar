@@ -201,25 +201,67 @@ cv::Mat svd_backward(
  *
  */
 void matMulDerivWrapper(
-	cv::InputArray _Amat, 
-	cv::InputArray _Bmat, 
-	cv::OutputArray _dABdA, 
-	cv::OutputArray _dABdB)
+    cv::InputArray _Amat, 
+    cv::InputArray _Bmat, 
+    cv::OutputArray _dABdA, 
+    cv::OutputArray _dABdB)
 {
-	cv::Mat A = _Amat.getMat(), B = _Bmat.getMat();
+    // A: m x k, B: k x n, AB: m x n
+    cv::Mat A = _Amat.getMat();
+    cv::Mat B = _Bmat.getMat();
 
-	if (_dABdA.needed())
-	{
-		_dABdA.create(A.rows*B.cols, A.rows*A.cols, A.type());
-	}
+    int m = A.rows;
+    int k = A.cols;
+    int n = B.cols;
 
-	if (_dABdB.needed())
-	{
-		_dABdB.create(A.rows*B.cols, B.rows*B.cols, A.type());
-	}
+    // d vec(AB) / d vec(A) = (B^T ⊗ I_m)
+    if (_dABdA.needed())
+    {
+        _dABdA.create(m * n, m * k, A.type());
+        cv::Mat dABdA = _dABdA.getMat();
+        dABdA.setTo(0);
 
-	CvMat matA = A, matB = B, c_dABdA=_dABdA.getMat(), c_dABdB=_dABdB.getMat();
-	cvCalcMatMulDeriv(&matA, &matB, _dABdA.needed() ? &c_dABdA : 0, _dABdB.needed() ? &c_dABdB : 0);
+        for (int j = 0; j < n; ++j)
+        {
+            for (int p = 0; p < k; ++p)
+            {
+                float coeff = B.at<float>(p, j);
+                if (coeff == 0.f) continue;
+
+                int row_start = j * m;
+                int col_start = p * m;
+
+                for (int i = 0; i < m; ++i)
+                {
+                    dABdA.at<float>(row_start + i, col_start + i) = coeff;
+                }
+            }
+        }
+    }
+
+    // d vec(AB) / d vec(B) = (I_n ⊗ A)
+    if (_dABdB.needed())
+    {
+        _dABdB.create(m * n, k * n, A.type());
+        cv::Mat dABdB = _dABdB.getMat();
+        dABdB.setTo(0);
+
+        for (int j = 0; j < n; ++j)
+        {
+            int row_start = j * m;
+            int col_start = j * k;
+
+            for (int r = 0; r < m; ++r)
+            {
+                const float* arow = A.ptr<float>(r);
+                float* out = dABdB.ptr<float>(row_start + r) + col_start;
+                for (int c = 0; c < k; ++c)
+                {
+                    out[c] = arow[c];
+                }
+            }
+        }
+    }
 }
 
 /*

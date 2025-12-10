@@ -75,6 +75,25 @@ namespace dsacstar
 		return sampling;
 	}
 
+	cv::Mat_<cv::Point2i> readSampling(
+		unsigned outW, unsigned outH,
+		dsacstar::coord_t &imageCoordinates)
+	{
+		cv::Mat_<cv::Point2i> sampling(outH, outW);
+		int batchIdx = 0;
+
+		#pragma omp parallel for
+		for (unsigned x = 0; x < outW; x++)
+			for (unsigned y = 0; y < outH; y++)
+			{
+				sampling(y, x) = cv::Point2i(
+					imageCoordinates[batchIdx][0][y][x],
+					imageCoordinates[batchIdx][1][y][x]);
+			}
+
+		return sampling;
+	}
+
 	/**
 	* @brief Wrapper for OpenCV solvePnP.
 	* Properly handles empty pose inputs.

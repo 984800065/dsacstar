@@ -43,6 +43,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "dsacstar_util_rgbd.h"
 #include "dsacstar_loss.h"
 #include "dsacstar_derivative.h"
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+#include <pybind11/stl.h>
+#include <opencv2/opencv.hpp>
+
+namespace py = pybind11;
 
 #define MAX_REF_STEPS 100 // max pose refienment iterations
 #define MAX_HYPOTHESES_TRIES 1000000 // repeat sampling x times hypothesis if hypothesis is invalid
@@ -60,8 +66,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * @param maxReproj Reprojection errors are clamped above this value (px).
  * @param subSampling Sub-sampling  of the scene coordinate prediction wrt the input image.
  */
-void dsacstar_rgb_forward(
+py::array_t<int> dsacstar_rgb_forward(
 	at::Tensor sceneCoordinatesSrc, 
+	at::Tensor imageCoordinatesSrc, 
 	at::Tensor outPoseSrc,
 	int ransacHypotheses, 
 	float inlierThreshold,
@@ -77,6 +84,8 @@ void dsacstar_rgb_forward(
 	// access to tensor objects
 	dsacstar::coord_t sceneCoordinates = 
 		sceneCoordinatesSrc.accessor<float, 4>();
+	dsacstar::coord_t imageCoordinates = 
+		imageCoordinatesSrc.accessor<float, 4>();
 
 	// dimensions of scene coordinate predictions
 	int imH = sceneCoordinates.size(2);
@@ -91,9 +100,9 @@ void dsacstar_rgb_forward(
 
 	// calculate original image position for each scene coordinate prediction
 	cv::Mat_<cv::Point2i> sampling = 
-		dsacstar::createSampling(imW, imH, subSampling, 0, 0);
+		dsacstar::readSampling(imW, imH, imageCoordinates);
 
-	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
+	// std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
 	StopWatch stopW;
 
 	// sample RANSAC hypotheses
@@ -114,8 +123,8 @@ void dsacstar_rgb_forward(
 		imgPts,
 		objPts);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
-	std::cout << BLUETEXT("Calculating scores.") << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
+	// std::cout << BLUETEXT("Calculating scores.") << std::endl;
     
 	// compute reprojection error images
 	std::vector<cv::Mat_<float>> reproErrs(ransacHypotheses);
@@ -137,20 +146,20 @@ void dsacstar_rgb_forward(
     	inlierThreshold,
     	inlierAlpha);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Drawing final hypothesis.") << std::endl;	
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << BLUETEXT("Drawing final hypothesis.") << std::endl;	
 
 	// apply soft max to scores to get a distribution
 	std::vector<double> hypProbs = dsacstar::softMax(scores);
 	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
 	int hypIdx = dsacstar::draw(hypProbs, false); // select winning hypothesis
 
-	std::cout << "Soft inlier count: " << scores[hypIdx] << " (Selection Probability: " << (int) (hypProbs[hypIdx]*100) << "%)" << std::endl; 
-	std::cout << "Entropy of hypothesis distribution: " << hypEntropy << std::endl;
+	// std::cout << "Soft inlier count: " << scores[hypIdx] << " (Selection Probability: " << (int) (hypProbs[hypIdx]*100) << "%)" << std::endl; 
+	// std::cout << "Entropy of hypothesis distribution: " << hypEntropy << std::endl;
 
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Refining winning pose:") << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << BLUETEXT("Refining winning pose:") << std::endl;
 
 	// refine selected hypothesis
 	cv::Mat_<int> inlierMap;
@@ -166,7 +175,7 @@ void dsacstar_rgb_forward(
 		hypotheses[hypIdx],
 		inlierMap);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 
 	// write result back to PyTorch
 	dsacstar::trans_t estTrans = dsacstar::pose2trans(hypotheses[hypIdx]);
@@ -175,6 +184,22 @@ void dsacstar_rgb_forward(
 	for(unsigned x = 0; x < 4; x++)
 	for(unsigned y = 0; y < 4; y++)
 		outPose[y][x] = estTrans(y, x);	
+
+	//return 
+	// return cv::sum(inlierMap)[0];
+	// inlierMap;
+	// 获得维度信息
+    const int height = inlierMap.rows;
+    const int width = inlierMap.cols;
+    
+    // 创建NumPy数组
+    auto result = py::array_t<int>(inlierMap.total());
+    result.resize({height, width});
+
+    // 复制cv::Mat数据到NumPy数组
+    memcpy(result.mutable_data(), inlierMap.data, inlierMap.total() * sizeof(int));
+    
+    return result;
 }
 
 /**
@@ -199,6 +224,7 @@ void dsacstar_rgb_forward(
 
 double dsacstar_rgb_backward(
 	at::Tensor sceneCoordinatesSrc, 
+	at::Tensor imageCoordinatesSrc, 
 	at::Tensor outSceneCoordinatesGradSrc, 
 	at::Tensor gtPoseSrc, 
 	int ransacHypotheses,
@@ -216,9 +242,28 @@ double dsacstar_rgb_backward(
 {
 	ThreadRand::init(randomSeed);
 
+	// 添加输入验证
+	if(sceneCoordinatesSrc.numel() == 0 || imageCoordinatesSrc.numel() == 0) {
+		std::cerr << "Error: Empty input tensors" << std::endl;
+		return 0.0;
+	}
+
+	if(ransacHypotheses <= 0 || ransacHypotheses > 10000) {
+		std::cerr << "Error: Invalid number of hypotheses: " << ransacHypotheses << std::endl;
+		return 0.0;
+	}
+
+	if(inlierThreshold <= 0 || focalLength <= 0) {
+		std::cerr << "Error: Invalid parameters" << std::endl;
+		return 0.0;
+	}
+
 	// access to tensor objects
 	dsacstar::coord_t sceneCoordinates = 
 		sceneCoordinatesSrc.accessor<float, 4>();
+
+	dsacstar::coord_t imageCoordinates = 
+		imageCoordinatesSrc.accessor<float, 4>();
 
 	dsacstar::coord_t sceneCoordinatesGrads = 
 		outSceneCoordinatesGradSrc.accessor<float, 4>();
@@ -244,10 +289,10 @@ double dsacstar_rgb_backward(
 
 	// calculate original image position for each scene coordinate prediction
 	cv::Mat_<cv::Point2i> sampling = 
-		dsacstar::createSampling(imW, imH, subSampling, 0, 0);
+		dsacstar::readSampling(imW, imH, imageCoordinates);
 
 	// sample RANSAC hypotheses
-	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
+	// std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
 	StopWatch stopW;
 
 	std::vector<dsacstar::pose_t> initHyps;
@@ -267,8 +312,8 @@ double dsacstar_rgb_backward(
 		imgPts,
 		objPts);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
-    std::cout << BLUETEXT("Calculating scores.") << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
+    // std::cout << BLUETEXT("Calculating scores.") << std::endl;
 
 	// compute reprojection error images
 	std::vector<cv::Mat_<float>> reproErrs(ransacHypotheses);
@@ -294,10 +339,10 @@ double dsacstar_rgb_backward(
 	// apply soft max to scores to get a distribution
 	std::vector<double> hypProbs = dsacstar::softMax(scores);
 	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
-	std::cout << "Entropy: " << hypEntropy << std::endl;
+	// std::cout << "Entropy: " << hypEntropy << std::endl;
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Refining poses:") << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << BLUETEXT("Refining poses:") << std::endl;
 
 	// collect inliers and refine poses
 	std::vector<dsacstar::pose_t> refHyps(ransacHypotheses);
@@ -323,10 +368,10 @@ double dsacstar_rgb_backward(
 			inlierMaps[h]);
 	}
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 	
 	// calculate expected pose loss
-	double expectedLoss = 0;
+	double expectedLoss = 0.0000001;
 	std::vector<double> losses(refHyps.size());
 
 	for(unsigned h = 0; h < refHyps.size(); h++)
@@ -342,7 +387,7 @@ double dsacstar_rgb_backward(
 	cv::Mat_<double> dLoss_dObj = cv::Mat_<double>::zeros(sampling.rows * sampling.cols, 3);
 
     // --- path I, hypothesis path --------------------------------------------------------------------
-    std::cout << BLUETEXT("Calculating gradients wrt hypotheses.") << std::endl;
+    // std::cout << BLUETEXT("Calculating gradients wrt hypotheses.") << std::endl;
 
     // precalculate gradients per of hypotheis wrt object coordinates
     std::vector<cv::Mat_<double>> dHyp_dObjs(refHyps.size());
@@ -353,7 +398,19 @@ double dsacstar_rgb_backward(
 		int batchIdx = 0; // only batch size=1 supported atm
 
         // differentiate refinement around optimum found in last optimization iteration
-        dHyp_dObjs[h] = cv::Mat_<double>::zeros(6, sampling.rows * sampling.cols * 3);
+        // 添加内存检查
+        size_t required_memory = 6 * sampling.rows * sampling.cols * 3 * sizeof(double);
+        if(required_memory > 1024 * 1024 * 1024) { // 超过1GB
+            std::cerr << "Warning: Large memory allocation required: " 
+                      << required_memory / (1024*1024) << " MB for hypothesis " << h << std::endl;
+        }
+
+        try {
+            dHyp_dObjs[h] = cv::Mat_<double>::zeros(6, sampling.rows * sampling.cols * 3);
+        } catch(const std::bad_alloc& e) {
+            std::cerr << "Memory allocation failed for hypothesis " << h << ": " << e.what() << std::endl;
+            continue;
+        }
 
         if(hypProbs[h] < PROB_THRESH) continue; // skip hypothesis with no impact on expectation
 
@@ -393,7 +450,8 @@ double dsacstar_rgb_backward(
 
         for(unsigned ptIdx = 0; ptIdx < objPts.size(); ptIdx++)
         {
-            double err = std::max(cv::norm(projections[ptIdx] - imgPts[ptIdx]), EPS);
+            double err = cv::norm(projections[ptIdx] - imgPts[ptIdx]);
+            if(err < EPS) err = EPS; // 避免除零
             if(err > maxReproj)
                 continue;
 
@@ -405,8 +463,29 @@ double dsacstar_rgb_backward(
             dNdH.copyTo(jacobeanR.row(ptIdx));
         }
 
-        //calculate the pseudo inverse
-        jacobeanR = - (jacobeanR.t() * jacobeanR).inv(cv::DECOMP_SVD) * jacobeanR.t();
+        //calculate the pseudo inverse with stability checks
+        cv::Mat jacobeanR_squared = jacobeanR.t() * jacobeanR;
+        
+        // 检查矩阵条件数
+        cv::Mat U, W, Vt;
+        cv::SVD::compute(jacobeanR_squared, W, U, Vt);
+        
+        // 检查条件数和奇异值
+        if(W.rows > 0 && W.cols > 0) {
+            double cond_number = W.at<double>(0,0) / W.at<double>(W.rows-1,0);
+            if(cond_number > 1e12 || W.at<double>(W.rows-1,0) < 1e-10) {
+                // 矩阵接近奇异，跳过这个假设
+                std::cerr << "Warning: Matrix near singular, skipping hypothesis " << h << std::endl;
+                continue;
+            }
+        }
+        
+        try {
+            jacobeanR = - jacobeanR_squared.inv(cv::DECOMP_SVD) * jacobeanR.t();
+        } catch(const cv::Exception& e) {
+            std::cerr << "Warning: Matrix inversion failed for hypothesis " << h << ": " << e.what() << std::endl;
+            continue;
+        }
 
         double maxJR = dsacstar::getMax(jacobeanR);
         if(maxJR > 10) jacobeanR = 0; // clamping for stability
@@ -420,7 +499,15 @@ double dsacstar_rgb_backward(
             dNdO = jacobeanR.col(ptIdx) * dNdO;
 
             int dIdx = srcPts[ptIdx].y * sampling.cols * 3 + srcPts[ptIdx].x * 3;
-            dNdO.copyTo(dHyp_dObjs[h].colRange(dIdx, dIdx + 3));
+            
+            // 添加边界检查
+            if(dIdx + 3 <= dHyp_dObjs[h].cols && dIdx >= 0) {
+                dNdO.copyTo(dHyp_dObjs[h].colRange(dIdx, dIdx + 3));
+            } else {
+                std::cerr << "Warning: Index out of bounds in gradient calculation: dIdx=" << dIdx 
+                          << ", cols=" << dHyp_dObjs[h].cols << std::endl;
+                continue;
+            }
         }
     }
 
@@ -437,11 +524,11 @@ double dsacstar_rgb_backward(
         gradients[h] = dLoss_dHyp * dHyp_dObjs[h];
     }
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+	// std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
     
     // --- path II, score path --------------------------------------------------------------------
 
-    std::cout << BLUETEXT("Calculating gradients wrt scores.") << std::endl;
+    // std::cout << BLUETEXT("Calculating gradients wrt scores.") << std::endl;
 
     std::vector<cv::Mat_<double>> dLoss_dScore_dObjs = dsacstar::dSMScore(
     	sceneCoordinates,
@@ -457,7 +544,7 @@ double dsacstar_rgb_backward(
     	inlierThreshold,
     	maxReproj);
 
-    std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+    // std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 
     // assemble full gradient tensor
     for(unsigned h = 0; h < refHyps.size(); h++)
@@ -469,424 +556,432 @@ double dsacstar_rgb_backward(
 	    {
 	    	int x = idx % sampling.cols;
 	    	int y = idx / sampling.cols;
+	    	
+	    	// 添加边界检查
+	    	if(x >= 0 && x < sampling.cols && y >= 0 && y < sampling.rows &&
+	    	   idx * 3 + 2 < gradients[h].cols && idx < dLoss_dScore_dObjs[h].rows) {
     	
-	        sceneCoordinatesGrads[batchIdx][0][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 0) + dLoss_dScore_dObjs[h](idx, 0);
-	        sceneCoordinatesGrads[batchIdx][1][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 1) + dLoss_dScore_dObjs[h](idx, 1);
-	        sceneCoordinatesGrads[batchIdx][2][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 2) + dLoss_dScore_dObjs[h](idx, 2);
+		        sceneCoordinatesGrads[batchIdx][0][y][x] += 
+		        	hypProbs[h] * gradients[h](idx * 3 + 0) + dLoss_dScore_dObjs[h](idx, 0);
+		        sceneCoordinatesGrads[batchIdx][1][y][x] += 
+		        	hypProbs[h] * gradients[h](idx * 3 + 1) + dLoss_dScore_dObjs[h](idx, 1);
+		        sceneCoordinatesGrads[batchIdx][2][y][x] += 
+		        	hypProbs[h] * gradients[h](idx * 3 + 2) + dLoss_dScore_dObjs[h](idx, 2);
+	    	} else {
+	    	    std::cerr << "Warning: Index out of bounds in final gradient assembly: idx=" << idx 
+	    	              << ", x=" << x << ", y=" << y << std::endl;
+	    	}
 	    }
 	}
 
 	return expectedLoss;
 }
 
-/**
- * @brief Estimate a camera pose based on a scene coordinate prediction
- * @param sceneCoordinatesSrc Scene coordinate prediction, (1x3xHxW) with 1=batch dimension (only batch_size=1 supported atm), 3=scene coordainte dimensions, H=height and W=width.
- * @param cameraCoordinatesSrc Camera coordinates (from measured depth), same size as scene coordinates.
- * @param outPoseSrc Camera pose (output parameter), (4x4) tensor containing the homogeneous camera tranformation matrix.
- * @param ransacHypotheses Number of RANSAC iterations.
- * @param inlierThreshold Inlier threshold for RANSAC in centimeters.
- * @param inlierAlpha Alpha parameter for soft inlier counting.
- * @param maxDistError Clamp pixel distance error with this value.
- */
-void dsacstar_rgbd_forward(
-	at::Tensor sceneCoordinatesSrc, 
-	at::Tensor cameraCoordinatesSrc, 
-	at::Tensor outPoseSrc,
-	int ransacHypotheses, 
-	float inlierThreshold,
-	float inlierAlpha,
-	float maxDistError)
-{
-	ThreadRand::init();
+// /**
+//  * @brief Estimate a camera pose based on a scene coordinate prediction
+//  * @param sceneCoordinatesSrc Scene coordinate prediction, (1x3xHxW) with 1=batch dimension (only batch_size=1 supported atm), 3=scene coordainte dimensions, H=height and W=width.
+//  * @param cameraCoordinatesSrc Camera coordinates (from measured depth), same size as scene coordinates.
+//  * @param outPoseSrc Camera pose (output parameter), (4x4) tensor containing the homogeneous camera tranformation matrix.
+//  * @param ransacHypotheses Number of RANSAC iterations.
+//  * @param inlierThreshold Inlier threshold for RANSAC in centimeters.
+//  * @param inlierAlpha Alpha parameter for soft inlier counting.
+//  * @param maxDistError Clamp pixel distance error with this value.
+//  */
+// void dsacstar_rgbd_forward(
+// 	at::Tensor sceneCoordinatesSrc, 
+// 	at::Tensor cameraCoordinatesSrc, 
+// 	at::Tensor outPoseSrc,
+// 	int ransacHypotheses, 
+// 	float inlierThreshold,
+// 	float inlierAlpha,
+// 	float maxDistError)
+// {
+// 	ThreadRand::init();
 
-	// access to tensor objects
-	dsacstar::coord_t sceneCoordinates = 
-		sceneCoordinatesSrc.accessor<float, 4>();
+// 	// access to tensor objects
+// 	dsacstar::coord_t sceneCoordinates = 
+// 		sceneCoordinatesSrc.accessor<float, 4>();
 
-	dsacstar::coord_t cameraCoordinates = 
-		cameraCoordinatesSrc.accessor<float, 4>();
+// 	dsacstar::coord_t cameraCoordinates = 
+// 		cameraCoordinatesSrc.accessor<float, 4>();
 
-	// dimensions of scene coordinate predictions
-	int imH = sceneCoordinates.size(2);
-	int imW = sceneCoordinates.size(3);
+// 	// dimensions of scene coordinate predictions
+// 	int imH = sceneCoordinates.size(2);
+// 	int imW = sceneCoordinates.size(3);
 
-	// collect all points with valid camera coordinate (ie valid depth measurement)
-	std::vector<cv::Point2i> validPts;
-	for(int x = 0; x < imW; x++)
-	for(int y = 0; y < imH; y++)	
-	{
-		if(	cameraCoordinates[0][0][y][x] != 0 &&
-			cameraCoordinates[0][0][y][x] != 0 &&
-			cameraCoordinates[0][0][y][x] != 0)
-			validPts.push_back(cv::Point2i(x, y));
-	}
+// 	// collect all points with valid camera coordinate (ie valid depth measurement)
+// 	std::vector<cv::Point2i> validPts;
+// 	for(int x = 0; x < imW; x++)
+// 	for(int y = 0; y < imH; y++)	
+// 	{
+// 		if(	cameraCoordinates[0][0][y][x] != 0 &&
+// 			cameraCoordinates[0][0][y][x] != 0 &&
+// 			cameraCoordinates[0][0][y][x] != 0)
+// 			validPts.push_back(cv::Point2i(x, y));
+// 	}
 
-	std::cout << "Valid points: " << validPts.size() << std::endl;
+// 	std::cout << "Valid points: " << validPts.size() << std::endl;
  
 
-	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
-	StopWatch stopW;
+// 	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
+// 	StopWatch stopW;
 	
-	// sample RANSAC hypotheses
-	std::vector<dsacstar::pose_t> hypotheses;
-	std::vector<std::vector<cv::Point2i>> sampledPoints;  
-	std::vector<std::vector<cv::Point3f>> eyePts;
-	std::vector<std::vector<cv::Point3f>> objPts;
+// 	// sample RANSAC hypotheses
+// 	std::vector<dsacstar::pose_t> hypotheses;
+// 	std::vector<std::vector<cv::Point2i>> sampledPoints;  
+// 	std::vector<std::vector<cv::Point3f>> eyePts;
+// 	std::vector<std::vector<cv::Point3f>> objPts;
 
-	dsacstar::sampleHypothesesRGBD(
-		sceneCoordinates,
-		cameraCoordinates,
-		validPts,
-		ransacHypotheses,
-		MAX_HYPOTHESES_TRIES,
-		inlierThreshold,
-		hypotheses,
-		sampledPoints,
-		eyePts,
-		objPts);
+// 	dsacstar::sampleHypothesesRGBD(
+// 		sceneCoordinates,
+// 		cameraCoordinates,
+// 		validPts,
+// 		ransacHypotheses,
+// 		MAX_HYPOTHESES_TRIES,
+// 		inlierThreshold,
+// 		hypotheses,
+// 		sampledPoints,
+// 		eyePts,
+// 		objPts);
    
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
-	std::cout << BLUETEXT("Calculating scores.") << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;	
+// 	std::cout << BLUETEXT("Calculating scores.") << std::endl;
 
-	// compute distance error images
-	std::vector<cv::Mat_<float>> distErrs(ransacHypotheses);
+// 	// compute distance error images
+// 	std::vector<cv::Mat_<float>> distErrs(ransacHypotheses);
 
-	#pragma omp parallel for 
-	for(unsigned h = 0; h < hypotheses.size(); h++)
-    	distErrs[h] = dsacstar::get3DDistErrs(
-		hypotheses[h], 
-		sceneCoordinates,
-		cameraCoordinates,
-		validPts,
-		maxDistError);
+// 	#pragma omp parallel for 
+// 	for(unsigned h = 0; h < hypotheses.size(); h++)
+//     	distErrs[h] = dsacstar::get3DDistErrs(
+// 		hypotheses[h], 
+// 		sceneCoordinates,
+// 		cameraCoordinates,
+// 		validPts,
+// 		maxDistError);
     
-    // soft inlier counting
-	std::vector<double> scores = dsacstar::getHypScores(
-    	distErrs,
-    	inlierThreshold,
-    	inlierAlpha);
+//     // soft inlier counting
+// 	std::vector<double> scores = dsacstar::getHypScores(
+//     	distErrs,
+//     	inlierThreshold,
+//     	inlierAlpha);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Drawing final hypothesis.") << std::endl;	
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << BLUETEXT("Drawing final hypothesis.") << std::endl;	
 
-	// apply soft max to scores to get a distribution
-	std::vector<double> hypProbs = dsacstar::softMax(scores);
-	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
-	int hypIdx = dsacstar::draw(hypProbs, false); // select winning hypothesis
+// 	// apply soft max to scores to get a distribution
+// 	std::vector<double> hypProbs = dsacstar::softMax(scores);
+// 	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
+// 	int hypIdx = dsacstar::draw(hypProbs, false); // select winning hypothesis
 
-	std::cout << "Soft inlier count: " << scores[hypIdx] << " (Selection Probability: " << (int) (hypProbs[hypIdx]*100) << "%)" << std::endl; 
-	std::cout << "Entropy of hypothesis distribution: " << hypEntropy << std::endl;
+// 	std::cout << "Soft inlier count: " << scores[hypIdx] << " (Selection Probability: " << (int) (hypProbs[hypIdx]*100) << "%)" << std::endl; 
+// 	std::cout << "Entropy of hypothesis distribution: " << hypEntropy << std::endl;
 
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Refining winning pose:") << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << BLUETEXT("Refining winning pose:") << std::endl;
 	
-	// refine selected hypothesis
-	cv::Mat_<int> inlierMap;
+// 	// refine selected hypothesis
+// 	cv::Mat_<int> inlierMap;
 
-	dsacstar::refineHypRGBD(
-		sceneCoordinates,
-		cameraCoordinates,
-		distErrs[hypIdx],
-		validPts,
-		inlierThreshold,
-		MAX_REF_STEPS,
-		maxDistError,
-		hypotheses[hypIdx],
-		inlierMap);
+// 	dsacstar::refineHypRGBD(
+// 		sceneCoordinates,
+// 		cameraCoordinates,
+// 		distErrs[hypIdx],
+// 		validPts,
+// 		inlierThreshold,
+// 		MAX_REF_STEPS,
+// 		maxDistError,
+// 		hypotheses[hypIdx],
+// 		inlierMap);
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 	
-	// write result back to PyTorch
-	dsacstar::trans_t estTrans = dsacstar::pose2trans(hypotheses[hypIdx]);
+// 	// write result back to PyTorch
+// 	dsacstar::trans_t estTrans = dsacstar::pose2trans(hypotheses[hypIdx]);
 
-	auto outPose = outPoseSrc.accessor<float, 2>();
-	for(unsigned x = 0; x < 4; x++)
-	for(unsigned y = 0; y < 4; y++)
-		outPose[y][x] = estTrans(y, x);	
+// 	auto outPose = outPoseSrc.accessor<float, 2>();
+// 	for(unsigned x = 0; x < 4; x++)
+// 	for(unsigned y = 0; y < 4; y++)
+// 		outPose[y][x] = estTrans(y, x);	
 	
-}
+// }
 
-/**
- * @brief Performs pose estimation from RGB-D, and calculates the gradients of the pose loss wrt to scene coordinates.
- * @param sceneCoordinatesSrc Scene coordinate prediction, (1x3xHxW) with 1=batch dimension (only batch_size=1 supported atm), 3=scene coordainte dimensions, H=height and W=width.
- * @param cameraCoordinatesSrc Camera coordinates (from measured depth), same size as scene coordinates.
- * @param outSceneCoordinatesGradSrc Scene coordinate gradients (output parameter). (1x3xHxW) same as scene coordinate input.
- * @param gtPoseSrc Ground truth camera pose, (4x4) tensor.
- * @param ransacHypotheses Number of RANSAC iterations.
- * @param inlierThreshold Inlier threshold for RANSAC in px.
- * @param wLossRot Weight of the rotation loss term.
- * @param wLossTrans Weight of the translation loss term.
- * @param softClamp Use sqrt of pose loss after this threshold.
- * @param inlierAlpha Alpha parameter for soft inlier counting.
- * @param maxDistError Clamp pixel distance error with this value.
- * @param randomSeed External random seed to make sure we draw different samples across calls of this function.
- * @return DSAC expectation of the pose loss.
- */
+// /**
+//  * @brief Performs pose estimation from RGB-D, and calculates the gradients of the pose loss wrt to scene coordinates.
+//  * @param sceneCoordinatesSrc Scene coordinate prediction, (1x3xHxW) with 1=batch dimension (only batch_size=1 supported atm), 3=scene coordainte dimensions, H=height and W=width.
+//  * @param cameraCoordinatesSrc Camera coordinates (from measured depth), same size as scene coordinates.
+//  * @param outSceneCoordinatesGradSrc Scene coordinate gradients (output parameter). (1x3xHxW) same as scene coordinate input.
+//  * @param gtPoseSrc Ground truth camera pose, (4x4) tensor.
+//  * @param ransacHypotheses Number of RANSAC iterations.
+//  * @param inlierThreshold Inlier threshold for RANSAC in px.
+//  * @param wLossRot Weight of the rotation loss term.
+//  * @param wLossTrans Weight of the translation loss term.
+//  * @param softClamp Use sqrt of pose loss after this threshold.
+//  * @param inlierAlpha Alpha parameter for soft inlier counting.
+//  * @param maxDistError Clamp pixel distance error with this value.
+//  * @param randomSeed External random seed to make sure we draw different samples across calls of this function.
+//  * @return DSAC expectation of the pose loss.
+//  */
 
-double dsacstar_rgbd_backward(
-	at::Tensor sceneCoordinatesSrc, 
-	at::Tensor cameraCoordinatesSrc, 
-	at::Tensor outSceneCoordinatesGradSrc, 
-	at::Tensor gtPoseSrc, 
-	int ransacHypotheses,
-	float inlierThreshold,
-	float wLossRot,
-	float wLossTrans,
-	float softClamp,
-	float inlierAlpha,
-	float maxDistError,
-	int randomSeed)
-{
-	ThreadRand::init(randomSeed);
+// double dsacstar_rgbd_backward(
+// 	at::Tensor sceneCoordinatesSrc, 
+// 	at::Tensor cameraCoordinatesSrc, 
+// 	at::Tensor outSceneCoordinatesGradSrc, 
+// 	at::Tensor gtPoseSrc, 
+// 	int ransacHypotheses,
+// 	float inlierThreshold,
+// 	float wLossRot,
+// 	float wLossTrans,
+// 	float softClamp,
+// 	float inlierAlpha,
+// 	float maxDistError,
+// 	int randomSeed)
+// {
+// 	ThreadRand::init(randomSeed);
 
-	// access to tensor objects
-	dsacstar::coord_t sceneCoordinates = 
-		sceneCoordinatesSrc.accessor<float, 4>();
+// 	// access to tensor objects
+// 	dsacstar::coord_t sceneCoordinates = 
+// 		sceneCoordinatesSrc.accessor<float, 4>();
 
-	dsacstar::coord_t cameraCoordinates = 
-		cameraCoordinatesSrc.accessor<float, 4>();
+// 	dsacstar::coord_t cameraCoordinates = 
+// 		cameraCoordinatesSrc.accessor<float, 4>();
 
-	dsacstar::coord_t sceneCoordinateGrads = 
-		outSceneCoordinatesGradSrc.accessor<float, 4>();		
+// 	dsacstar::coord_t sceneCoordinateGrads = 
+// 		outSceneCoordinatesGradSrc.accessor<float, 4>();		
 
-	//convert ground truth pose type
-	dsacstar::trans_t gtTrans(4, 4);
-	auto gtPose = gtPoseSrc.accessor<float, 2>();
+// 	//convert ground truth pose type
+// 	dsacstar::trans_t gtTrans(4, 4);
+// 	auto gtPose = gtPoseSrc.accessor<float, 2>();
 
-	for(unsigned x = 0; x < 4; x++)
-	for(unsigned y = 0; y < 4; y++)
-		gtTrans(y, x) = gtPose[y][x];
+// 	for(unsigned x = 0; x < 4; x++)
+// 	for(unsigned y = 0; y < 4; y++)
+// 		gtTrans(y, x) = gtPose[y][x];
 
-	// dimensions of scene coordinate predictions
-	int imH = sceneCoordinates.size(2);
-	int imW = sceneCoordinates.size(3);
+// 	// dimensions of scene coordinate predictions
+// 	int imH = sceneCoordinates.size(2);
+// 	int imW = sceneCoordinates.size(3);
 
-	// collect all points with valid camera coordinate (ie valid depth measurement)
-	std::vector<cv::Point2i> validPts;
-	for(int x = 0; x < imW; x++)
-	for(int y = 0; y < imH; y++)	
-	{
-		if(	cameraCoordinates[0][0][y][x] != 0 &&
-			cameraCoordinates[0][0][y][x] != 0 &&
-			cameraCoordinates[0][0][y][x] != 0)
-			validPts.push_back(cv::Point2i(x, y));
-	}
+// 	// collect all points with valid camera coordinate (ie valid depth measurement)
+// 	std::vector<cv::Point2i> validPts;
+// 	for(int x = 0; x < imW; x++)
+// 	for(int y = 0; y < imH; y++)	
+// 	{
+// 		if(	cameraCoordinates[0][0][y][x] != 0 &&
+// 			cameraCoordinates[0][0][y][x] != 0 &&
+// 			cameraCoordinates[0][0][y][x] != 0)
+// 			validPts.push_back(cv::Point2i(x, y));
+// 	}
 
-	std::cout << "Valid points: " << validPts.size() << std::endl;
+// 	std::cout << "Valid points: " << validPts.size() << std::endl;
  
 
-	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
-	StopWatch stopW;
+// 	std::cout << BLUETEXT("Sampling " << ransacHypotheses << " hypotheses.") << std::endl;
+// 	StopWatch stopW;
 	
-	// sample RANSAC hypotheses
-	std::vector<dsacstar::pose_t> initHyps;
-	std::vector<std::vector<cv::Point2i>> sampledPoints;  
-	std::vector<std::vector<cv::Point3f>> eyePts;
-	std::vector<std::vector<cv::Point3f>> objPts;
+// 	// sample RANSAC hypotheses
+// 	std::vector<dsacstar::pose_t> initHyps;
+// 	std::vector<std::vector<cv::Point2i>> sampledPoints;  
+// 	std::vector<std::vector<cv::Point3f>> eyePts;
+// 	std::vector<std::vector<cv::Point3f>> objPts;
 
-	dsacstar::sampleHypothesesRGBD(
-		sceneCoordinates,
-		cameraCoordinates,
-		validPts,
-		ransacHypotheses,
-		MAX_HYPOTHESES_TRIES,
-		inlierThreshold,
-		initHyps,
-		sampledPoints,
-		eyePts,
-		objPts);
+// 	dsacstar::sampleHypothesesRGBD(
+// 		sceneCoordinates,
+// 		cameraCoordinates,
+// 		validPts,
+// 		ransacHypotheses,
+// 		MAX_HYPOTHESES_TRIES,
+// 		inlierThreshold,
+// 		initHyps,
+// 		sampledPoints,
+// 		eyePts,
+// 		objPts);
    
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Calculating scores.") << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << BLUETEXT("Calculating scores.") << std::endl;
 
-	// compute distance error images
-	std::vector<cv::Mat_<float>> distErrs(ransacHypotheses);
+// 	// compute distance error images
+// 	std::vector<cv::Mat_<float>> distErrs(ransacHypotheses);
 
-	#pragma omp parallel for 
-	for(unsigned h = 0; h < initHyps.size(); h++)
-    	distErrs[h] = dsacstar::get3DDistErrs(
-		initHyps[h], 
-		sceneCoordinates,
-		cameraCoordinates,
-		validPts,
-		maxDistError);
+// 	#pragma omp parallel for 
+// 	for(unsigned h = 0; h < initHyps.size(); h++)
+//     	distErrs[h] = dsacstar::get3DDistErrs(
+// 		initHyps[h], 
+// 		sceneCoordinates,
+// 		cameraCoordinates,
+// 		validPts,
+// 		maxDistError);
     
-    // soft inlier counting
-	std::vector<double> scores = dsacstar::getHypScores(
-    	distErrs,
-    	inlierThreshold,
-    	inlierAlpha);
+//     // soft inlier counting
+// 	std::vector<double> scores = dsacstar::getHypScores(
+//     	distErrs,
+//     	inlierThreshold,
+//     	inlierAlpha);
 
-	// apply soft max to scores to get a distribution
-	std::vector<double> hypProbs = dsacstar::softMax(scores);
-	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
-	std::cout << "Entropy: " << hypEntropy << std::endl;
+// 	// apply soft max to scores to get a distribution
+// 	std::vector<double> hypProbs = dsacstar::softMax(scores);
+// 	double hypEntropy = dsacstar::entropy(hypProbs); // measure distribution entropy
+// 	std::cout << "Entropy: " << hypEntropy << std::endl;
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
-	std::cout << BLUETEXT("Refining poses:") << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << BLUETEXT("Refining poses:") << std::endl;
 
-	// collect inliers and refine poses
-	std::vector<dsacstar::pose_t> refHyps(ransacHypotheses);
-	std::vector<cv::Mat_<int>> inlierMaps(refHyps.size());
+// 	// collect inliers and refine poses
+// 	std::vector<dsacstar::pose_t> refHyps(ransacHypotheses);
+// 	std::vector<cv::Mat_<int>> inlierMaps(refHyps.size());
 	
-	#pragma omp parallel for
-	for(unsigned h = 0; h < refHyps.size(); h++)
-	{
-		refHyps[h].first = initHyps[h].first.clone();
-		refHyps[h].second = initHyps[h].second.clone();
+// 	#pragma omp parallel for
+// 	for(unsigned h = 0; h < refHyps.size(); h++)
+// 	{
+// 		refHyps[h].first = initHyps[h].first.clone();
+// 		refHyps[h].second = initHyps[h].second.clone();
 
-		if(hypProbs[h] < PROB_THRESH) continue; // save computation when little influence on expectation
+// 		if(hypProbs[h] < PROB_THRESH) continue; // save computation when little influence on expectation
 
-		dsacstar::refineHypRGBD(
-			sceneCoordinates,
-			cameraCoordinates,
-			distErrs[h],
-			validPts,
-			inlierThreshold,
-			MAX_REF_STEPS,
-			maxDistError,
-			refHyps[h],
-			inlierMaps[h]);
-	}
+// 		dsacstar::refineHypRGBD(
+// 			sceneCoordinates,
+// 			cameraCoordinates,
+// 			distErrs[h],
+// 			validPts,
+// 			inlierThreshold,
+// 			MAX_REF_STEPS,
+// 			maxDistError,
+// 			refHyps[h],
+// 			inlierMaps[h]);
+// 	}
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 
-	// calculate expected pose loss
-	double expectedLoss = 0;
-	std::vector<double> losses(refHyps.size());
+// 	// calculate expected pose loss
+// 	double expectedLoss = 0;
+// 	std::vector<double> losses(refHyps.size());
 
-	for(unsigned h = 0; h < refHyps.size(); h++)
-	{
-		dsacstar::trans_t estTrans = dsacstar::pose2trans(refHyps[h]);
-		losses[h] = dsacstar::loss(estTrans, gtTrans, wLossRot, wLossTrans, softClamp);
-		expectedLoss += hypProbs[h] * losses[h];
-	}
+// 	for(unsigned h = 0; h < refHyps.size(); h++)
+// 	{
+// 		dsacstar::trans_t estTrans = dsacstar::pose2trans(refHyps[h]);
+// 		losses[h] = dsacstar::loss(estTrans, gtTrans, wLossRot, wLossTrans, softClamp);
+// 		expectedLoss += hypProbs[h] * losses[h];
+// 	}
 	
-   	// === doing the backward pass ====================================================================
+//    	// === doing the backward pass ====================================================================
 	
-	// acumulate hypotheses gradients for patches
-	cv::Mat_<double> dLoss_dObj = cv::Mat_<double>::zeros(imH * imW, 3);
+// 	// acumulate hypotheses gradients for patches
+// 	cv::Mat_<double> dLoss_dObj = cv::Mat_<double>::zeros(imH * imW, 3);
 
-    // --- path I, hypothesis path --------------------------------------------------------------------
-    std::cout << BLUETEXT("Calculating gradients wrt hypotheses.") << std::endl;
+//     // --- path I, hypothesis path --------------------------------------------------------------------
+//     std::cout << BLUETEXT("Calculating gradients wrt hypotheses.") << std::endl;
 
-    // precalculate gradients per of hypotheis wrt object coordinates
-    std::vector<cv::Mat_<double>> dHyp_dObjs(refHyps.size());
+//     // precalculate gradients per of hypotheis wrt object coordinates
+//     std::vector<cv::Mat_<double>> dHyp_dObjs(refHyps.size());
 	
-    #pragma omp parallel for
-    for(unsigned h = 0; h < refHyps.size(); h++)
-    {
-		int batchIdx = 0; // only batch size=1 supported atm
+//     #pragma omp parallel for
+//     for(unsigned h = 0; h < refHyps.size(); h++)
+//     {
+// 		int batchIdx = 0; // only batch size=1 supported atm
 
-        // differentiate refinement around optimum found in last optimization iteration
-        dHyp_dObjs[h] = cv::Mat_<double>::zeros(6, imH * imW * 3);
+//         // differentiate refinement around optimum found in last optimization iteration
+//         dHyp_dObjs[h] = cv::Mat_<double>::zeros(6, imH * imW * 3);
 
-        if(hypProbs[h] < PROB_THRESH) continue; // skip hypothesis with no impact on expectation
+//         if(hypProbs[h] < PROB_THRESH) continue; // skip hypothesis with no impact on expectation
 
-		// collect inlier correspondences of last refinement iteration
-		std::vector<cv::Point3f> eyePts;
-		std::vector<cv::Point2i> srcPts;
-		std::vector<cv::Point3f> objPts;
+// 		// collect inlier correspondences of last refinement iteration
+// 		std::vector<cv::Point3f> eyePts;
+// 		std::vector<cv::Point2i> srcPts;
+// 		std::vector<cv::Point3f> objPts;
 
-		for(int x = 0; x < inlierMaps[h].cols; x++)
-		for(int y = 0; y < inlierMaps[h].rows; y++)
-		{
-			if(inlierMaps[h](y, x))
-			{
-				srcPts.push_back(cv::Point2i(x, y));
-				objPts.push_back(cv::Point3f(
-					sceneCoordinates[batchIdx][0][y][x],
-					sceneCoordinates[batchIdx][1][y][x],
-					sceneCoordinates[batchIdx][2][y][x]));
-				eyePts.push_back(cv::Point3f(
-					cameraCoordinates[batchIdx][0][y][x],
-					cameraCoordinates[batchIdx][1][y][x],
-					cameraCoordinates[batchIdx][2][y][x]));				
-			}
-		}
+// 		for(int x = 0; x < inlierMaps[h].cols; x++)
+// 		for(int y = 0; y < inlierMaps[h].rows; y++)
+// 		{
+// 			if(inlierMaps[h](y, x))
+// 			{
+// 				srcPts.push_back(cv::Point2i(x, y));
+// 				objPts.push_back(cv::Point3f(
+// 					sceneCoordinates[batchIdx][0][y][x],
+// 					sceneCoordinates[batchIdx][1][y][x],
+// 					sceneCoordinates[batchIdx][2][y][x]));
+// 				eyePts.push_back(cv::Point3f(
+// 					cameraCoordinates[batchIdx][0][y][x],
+// 					cameraCoordinates[batchIdx][1][y][x],
+// 					cameraCoordinates[batchIdx][2][y][x]));				
+// 			}
+// 		}
 
-        if(eyePts.size() < 3)
-            continue;
+//         if(eyePts.size() < 3)
+//             continue;
 
-        // calculate gradients of final inlier set
-        dsacstar::pose_t cvHypDummy;
-        cv::Mat_<double> dHdO;
-        kabsch(eyePts, objPts, cvHypDummy, dHdO);
-        if (dHdO.empty())
-        	dKabschFD(eyePts, objPts, dHdO);
+//         // calculate gradients of final inlier set
+//         dsacstar::pose_t cvHypDummy;
+//         cv::Mat_<double> dHdO;
+//         kabsch(eyePts, objPts, cvHypDummy, dHdO);
+//         if (dHdO.empty())
+//         	dKabschFD(eyePts, objPts, dHdO);
 
-        for(unsigned ptIdx = 0; ptIdx < objPts.size(); ptIdx++)
-        {
-            int dIdx = srcPts[ptIdx].y * imW * 3 + srcPts[ptIdx].x * 3;
-            dHdO.colRange(ptIdx*3, ptIdx*3+3).copyTo(dHyp_dObjs[h].colRange(dIdx, dIdx + 3));
-        }
-    }
+//         for(unsigned ptIdx = 0; ptIdx < objPts.size(); ptIdx++)
+//         {
+//             int dIdx = srcPts[ptIdx].y * imW * 3 + srcPts[ptIdx].x * 3;
+//             dHdO.colRange(ptIdx*3, ptIdx*3+3).copyTo(dHyp_dObjs[h].colRange(dIdx, dIdx + 3));
+//         }
+//     }
     
-    // combine gradients per hypothesis
-    std::vector<cv::Mat_<double>> gradients(refHyps.size());
-    dsacstar::pose_t hypGT = dsacstar::trans2pose(gtTrans);
+//     // combine gradients per hypothesis
+//     std::vector<cv::Mat_<double>> gradients(refHyps.size());
+//     dsacstar::pose_t hypGT = dsacstar::trans2pose(gtTrans);
 
-    #pragma omp parallel for
-    for(unsigned h = 0; h < refHyps.size(); h++)
-    {
-		if(hypProbs[h] < PROB_THRESH) continue;
+//     #pragma omp parallel for
+//     for(unsigned h = 0; h < refHyps.size(); h++)
+//     {
+// 		if(hypProbs[h] < PROB_THRESH) continue;
 
-        cv::Mat_<double> dLoss_dHyp = dsacstar::dLoss(refHyps[h], hypGT, wLossRot, wLossTrans, softClamp);
-        gradients[h] = dLoss_dHyp * dHyp_dObjs[h];
-    }
+//         cv::Mat_<double> dLoss_dHyp = dsacstar::dLoss(refHyps[h], hypGT, wLossRot, wLossTrans, softClamp);
+//         gradients[h] = dLoss_dHyp * dHyp_dObjs[h];
+//     }
 
-	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+// 	std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
     
-    // --- path II, score path --------------------------------------------------------------------
+//     // --- path II, score path --------------------------------------------------------------------
 
-    std::cout << BLUETEXT("Calculating gradients wrt scores.") << std::endl;
+//     std::cout << BLUETEXT("Calculating gradients wrt scores.") << std::endl;
 
-    std::vector<cv::Mat_<double>> dLoss_dScore_dObjs = dsacstar::dSMScoreRGBD(
-    	sceneCoordinates,
-    	cameraCoordinates,
-    	validPts, 
-    	sampledPoints, 
-    	losses, 
-    	hypProbs, 
-    	initHyps, 
-    	distErrs, 
-    	inlierAlpha,
-    	inlierThreshold,
-    	maxDistError);
+//     std::vector<cv::Mat_<double>> dLoss_dScore_dObjs = dsacstar::dSMScoreRGBD(
+//     	sceneCoordinates,
+//     	cameraCoordinates,
+//     	validPts, 
+//     	sampledPoints, 
+//     	losses, 
+//     	hypProbs, 
+//     	initHyps, 
+//     	distErrs, 
+//     	inlierAlpha,
+//     	inlierThreshold,
+//     	maxDistError);
 
-    std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
+//     std::cout << "Done in " << stopW.stop() / 1000 << "s." << std::endl;
 
-    // assemble full gradient tensor
-    for(unsigned h = 0; h < refHyps.size(); h++)
-    {
-		if(hypProbs[h] < PROB_THRESH) continue;
-		int batchIdx = 0; // only batch size=1 supported atm
+//     // assemble full gradient tensor
+//     for(unsigned h = 0; h < refHyps.size(); h++)
+//     {
+// 		if(hypProbs[h] < PROB_THRESH) continue;
+// 		int batchIdx = 0; // only batch size=1 supported atm
 
-	    for(int idx = 0; idx < imH * imW; idx++)
-	    {
-	    	int x = idx % imW;
-	    	int y = idx / imW;
+// 	    for(int idx = 0; idx < imH * imW; idx++)
+// 	    {
+// 	    	int x = idx % imW;
+// 	    	int y = idx / imW;
     	
-	        sceneCoordinateGrads[batchIdx][0][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 0) + dLoss_dScore_dObjs[h](idx, 0);
-	        sceneCoordinateGrads[batchIdx][1][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 1) + dLoss_dScore_dObjs[h](idx, 1);
-	        sceneCoordinateGrads[batchIdx][2][y][x] += 
-	        	hypProbs[h] * gradients[h](idx * 3 + 2) + dLoss_dScore_dObjs[h](idx, 2);
-	    }
-	}
+// 	        sceneCoordinateGrads[batchIdx][0][y][x] += 
+// 	        	hypProbs[h] * gradients[h](idx * 3 + 0) + dLoss_dScore_dObjs[h](idx, 0);
+// 	        sceneCoordinateGrads[batchIdx][1][y][x] += 
+// 	        	hypProbs[h] * gradients[h](idx * 3 + 1) + dLoss_dScore_dObjs[h](idx, 1);
+// 	        sceneCoordinateGrads[batchIdx][2][y][x] += 
+// 	        	hypProbs[h] * gradients[h](idx * 3 + 2) + dLoss_dScore_dObjs[h](idx, 2);
+// 	    }
+// 	}
 
-	return expectedLoss;
-}
+// 	return expectedLoss;
+// }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 	m.def("forward_rgb", &dsacstar_rgb_forward, "DSAC* forward (RGB)");
 	m.def("backward_rgb", &dsacstar_rgb_backward, "DSAC* backward (RGB)");
-	m.def("forward_rgbd", &dsacstar_rgbd_forward, "DSAC* forward (RGB-D)");
-	m.def("backward_rgbd", &dsacstar_rgbd_backward, "DSAC* backward (RGB-D)");
+	// m.def("forward_rgbd", &dsacstar_rgbd_forward, "DSAC* forward (RGB-D)");
+	// m.def("backward_rgbd", &dsacstar_rgbd_backward, "DSAC* backward (RGB-D)");
 }

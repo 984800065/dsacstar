@@ -1,38 +1,28 @@
 from setuptools import setup
 from torch.utils.cpp_extension import CppExtension, BuildExtension
-import os
+import subprocess
 
-opencv_inc_dir = '' # directory containing OpenCV header files
-opencv_lib_dir = '' # directory containing OpenCV library files
+# 通过 pkg-config 获取系统 OpenCV4 的编译和链接参数
+def pkgconfig_flags(mod):
+    flags = subprocess.check_output(['pkg-config', '--cflags', '--libs', mod]).decode().strip().split()
+    include_dirs = [f[2:] for f in flags if f.startswith('-I')]
+    library_dirs = [f[2:] for f in flags if f.startswith('-L')]
+    libraries = [f[2:] for f in flags if f.startswith('-l')]
+    return include_dirs, library_dirs, libraries
 
-#if not explicitly provided, we try to locate OpenCV in the current Conda environment
-conda_env = os.environ['CONDA_PREFIX']
-
-if len(conda_env) > 0 and len(opencv_inc_dir) == 0 and len(opencv_lib_dir) == 0:
-	print("Detected active conda environment:", conda_env)
-	
-	opencv_inc_dir = conda_env + '/include' 
-	opencv_lib_dir = conda_env + '/lib' 
-
-	print("Assuming OpenCV dependencies in:")
-	print(opencv_inc_dir)
-	print(opencv_lib_dir)
-
-if len(opencv_inc_dir) == 0:
-	print("Error: You have to provide an OpenCV include directory. Edit this file.")
-	exit()
-if len(opencv_lib_dir) == 0:
-	print("Error: You have to provide an OpenCV library directory. Edit this file.")
-	exit()
-
+opencv_inc_dirs, opencv_lib_dirs, opencv_libs = pkgconfig_flags('opencv4')
+print(opencv_inc_dirs, opencv_lib_dirs, opencv_libs)
 setup(
-	name='dsacstar',
-	ext_modules=[CppExtension(
-		name='dsacstar', 
-		sources=['dsacstar.cpp','thread_rand.cpp'],
-		include_dirs=[opencv_inc_dir],
-		library_dirs=[opencv_lib_dir],
-		libraries=['opencv_core','opencv_calib3d'],
-		extra_compile_args=['-fopenmp']
-		)],		
-	cmdclass={'build_ext': BuildExtension})
+    name='dsacstar',
+    ext_modules=[
+        CppExtension(
+            name='dsacstar',
+            sources=['dsacstar.cpp', 'thread_rand.cpp'],
+            include_dirs=opencv_inc_dirs,
+            library_dirs=opencv_lib_dirs,
+            libraries=opencv_libs,
+            extra_compile_args=['-fopenmp', '-std=c++17']
+        )
+    ],
+    cmdclass={'build_ext': BuildExtension}
+)
