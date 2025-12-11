@@ -34,9 +34,9 @@ DSAC\* is based on PyTorch, and includes a custom C++ extension which you have t
 DSAC\* requires the following python packages, and we tested it with the package versions in brackets
 
 ```
-pytorch (1.6.0)
-opencv (3.4.2)
-scikit-image (0.16.2)
+pytorch (2.9.1)
+opencv (4.12.0)
+scikit-image (0.25.2)
 ```
 
 The repository contains an `environment.yml` for the use with Conda:
@@ -45,11 +45,17 @@ conda env create -f environment.yml
 conda activate dsacstar
 ```
 
+Then install python package with pip:
+```bash
+pip install -r requirements.txt
+```
+Attention, you may need to modify pytorch version in requirements.txt, because it needs special download source.
+
 You compile and install the C++ extension by executing:
 
 ```bash
 cd dsacstar
-python setup.py install
+bash install.sh 
 ```
 Compilation requires access to OpenCV header files and libraries. If you are using Conda, the setup script will look for the OpenCV package in the current Conda environment. Otherwise (or if that fails), you have to set the OpenCV library directory and include directory yourself by editing the setup.py file.
 
