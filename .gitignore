@@ -1,0 +1,32 @@
+# Python 缓存与编译产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+
+# 虚拟环境与依赖管理
+.env
+.venv
+env/
+venv/
+
+# 构建/分发产物
+build/
+dist/
+*.egg-info/
+
+# 工具与编辑器
+.idea/
+.vscode/
+.DS_Store
+
+# 测试与日志
+.pytest_cache/
+*.log
+
+# 笔记本与中间文件
+.ipynb_checkpoints/
+
+# 项目数据（4dclip1 相关）
+datasets/4dclip1*
+log_init_*.txt
