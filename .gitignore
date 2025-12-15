@@ -38,3 +38,6 @@ pose_alignment/result_old
 pose_alignment/features
 pose_alignment/logs
 pose_alignment/__pycache__/
+
+# 压缩包
+*.zip
