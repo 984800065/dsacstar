@@ -1,4 +1,5 @@
 import argparse
+import csv
 import shutil
 import sys
 from pathlib import Path
@@ -47,6 +48,7 @@ def one_to_one_top1_matching(
     names2: List[str],
     index2: faiss.Index,
     similarity_threshold: float,
+    similarity_upper_threshold: float,
 ) -> List[Tuple[str, str, float]]:
     """
     实现 Dataset1 -> Dataset2 的一对一 Top-1 匹配 + 阈值 cut。
@@ -89,8 +91,12 @@ def one_to_one_top1_matching(
             # 没有找到未使用的候选
             continue
 
+        # 下限阈值 cut：相似度太低直接丢弃
         if matched_score < similarity_threshold:
-            # 阈值 cut：即使找到 top1，也不输出
+            continue
+
+        # 上限阈值 cut：相似度高于给定上界也丢弃（用于过滤过于相似/潜在重复）
+        if matched_score > similarity_upper_threshold:
             continue
 
         used_mask[idxs[0]] = True
@@ -125,6 +131,13 @@ def copy_and_rename_pairs(
         for sub_dir in ["rgb", "calibration", "poses"]:
             (sub_root / sub_dir).mkdir(parents=True, exist_ok=True)
 
+    # 同时在这里写出 matches.csv，保证 new_id 与拷贝顺序一致
+    csv_path = output_root / "matches.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_path.open("w", newline="", encoding="utf-8")
+    writer = csv.writer(csv_file)
+    writer.writerow(["new_id", "name_4dclip1", "name_renders", "similarity"])
+
     def copy_triplet(
         src_root: Path,
         basename: str,
@@ -156,10 +169,14 @@ def copy_and_rename_pairs(
         tqdm(matches, desc="复制并重命名匹配样本")
     ):
         logger.debug(f"复制样本对 {new_id}: {name1} <-> {name2} (score={score:.4f})")
+        # 写入匹配元数据
+        writer.writerow([new_id, name1, name2, f"{score:.6f}"])
+        # 复制对应三元文件
         copy_triplet(dataset1_root, name1, sub1_root, new_id)
         copy_triplet(dataset2_root, name2, sub2_root, new_id)
 
-    logger.info(f"结果文件写入完成，输出目录：{output_root}")
+    csv_file.close()
+    logger.info(f"结果文件与 matches.csv 写入完成，输出目录：{output_root}")
 
 
 def main() -> None:
@@ -189,6 +206,12 @@ def main() -> None:
         help="相似度阈值（余弦相似度），小于该值则不认为匹配成功",
     )
     parser.add_argument(
+        "--similarity_upper_threshold",
+        type=float,
+        default=1.0,
+        help="相似度上限阈值，大于该值也不认为匹配成功（用于过滤过于相似的样本），默认 1.0 表示不启用",
+    )
+    parser.add_argument(
         "--output_root",
         type=str,
         default="result",
@@ -204,6 +227,7 @@ def main() -> None:
         f"dataset2_root={args.dataset2_root}, "
         f"features_dir={args.features_dir}, "
         f"similarity_threshold={args.similarity_threshold}, "
+        f"similarity_upper_threshold={args.similarity_upper_threshold}, "
         f"output_root={args.output_root}"
     )
 
@@ -227,6 +251,7 @@ def main() -> None:
         names2=names2,
         index2=index2,
         similarity_threshold=args.similarity_threshold,
+        similarity_upper_threshold=args.similarity_upper_threshold,
     )
 
     dataset1_root = CURRENT_DIR / args.dataset1_root
