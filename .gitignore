@@ -29,4 +29,9 @@ dist/
 
 # 项目数据（4dclip1 相关）
 datasets/4dclip1*
+datasets/renders*
 log_init_*.txt
+pose_alignment/4dclip1
+pose_alignment/renders
+pose_alignment/result
+pose_alignment/__pycache__/
