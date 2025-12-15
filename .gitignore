@@ -34,4 +34,7 @@ log_init_*.txt
 pose_alignment/4dclip1
 pose_alignment/renders
 pose_alignment/result
+pose_alignment/result_old
+pose_alignment/features
+pose_alignment/logs
 pose_alignment/__pycache__/
